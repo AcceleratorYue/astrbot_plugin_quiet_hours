@@ -1,0 +1,122 @@
+{
+  "enabled": {
+    "description": "启用静默时段",
+    "type": "bool",
+    "hint": "关闭后完全不影响正常使用",
+    "default": true
+  },
+  "schemes": {
+    "description": "静默方案（JSON 数组）",
+    "type": "text",
+    "hint": "可配置多个方案，像闹钟一样：每个方案包含 name（名称）、windows（时间段数组）、weekdays（重复星期，留空=每天）、holidays（skip=法定节假日跳过 / run=法定节假日也启用）、enabled（是否启用）。留空则退回旧版 time_windows + active_weekdays 单方案。示例：[{\"name\":\"工作日高峰\",\"weekdays\":\"1,2,3,4,5\",\"windows\":[\"09:00-12:00\",\"14:00-18:00\"],\"holidays\":\"skip\"},{\"name\":\"夜间宵禁\",\"weekdays\":\"\",\"windows\":[\"23:00-07:00\"],\"holidays\":\"run\"}]",
+    "default": ""
+  },
+  "time_windows": {
+    "description": "静默时段（旧版单方案）",
+    "type": "list",
+    "hint": "仅在 schemes 为空时生效。格式 HH:MM-HH:MM，可填多个；跨天如 23:00-08:00；00:00-00:00 表示全天",
+    "items": {
+      "type": "string"
+    },
+    "default": []
+  },
+  "active_weekdays": {
+    "description": "生效星期（旧版单方案）",
+    "type": "string",
+    "hint": "仅在 schemes 为空时生效。ISO 星期：1=周一 … 7=周日，用逗号分隔（如 1,2,3,4,5）；留空 = 每天",
+    "default": "1,2,3,4,5,6,7"
+  },
+  "holiday_enabled": {
+    "description": "启用法定节假日识别",
+    "type": "bool",
+    "hint": "开启后，方案里 holidays=skip 的在法定节假日自动跳过，holidays=run 的继续生效；调休补班日按普通工作日处理",
+    "default": true
+  },
+  "holiday_auto_update": {
+    "description": "自动更新节假日数据",
+    "type": "bool",
+    "hint": "启动时联网拉取当年/次年放假数据并缓存到 plugin_data；失败时使用内置数据（2024-2026），不影响使用",
+    "default": true
+  },
+  "holiday_update_url": {
+    "description": "节假日数据源",
+    "type": "string",
+    "hint": "留空使用默认源（jsDelivr 的 holiday-cn 数据，含 {year} 占位符）；也可填自定义 URL",
+    "default": ""
+  },
+  "timezone": {
+    "description": "时区",
+    "type": "string",
+    "hint": "留空跟随系统时区；也可填 IANA 时区，如 Asia/Shanghai",
+    "default": ""
+  },
+  "scope": {
+    "description": "生效范围",
+    "type": "string",
+    "hint": "all=所有会话，groups=仅群聊，private=仅私聊",
+    "options": [
+      "all",
+      "groups",
+      "private"
+    ],
+    "default": "all"
+  },
+  "block_mode": {
+    "description": "静默强度",
+    "type": "string",
+    "hint": "full=完全关闭（默认，静默期其他插件一律不执行）；keep_context=保留上下文/缓存（只放行下方白名单插件的被动处理，其余插件全部拦停）",
+    "options": [
+      "full",
+      "keep_context"
+    ],
+    "default": "full"
+  },
+  "context_plugins": {
+    "description": "保留的上下文/缓存插件",
+    "type": "list",
+    "hint": "填写插件目录名（例如 astrbot_plugin_context_aware、meme_manager，按你实际安装的插件填写）。仅「保留上下文/缓存」模式生效：这些插件的被动消息处理会继续执行（用于记录上下文、维护缓存），但它们的回复和指令仍会被拦掉",
+    "items": {
+      "type": "string"
+    },
+    "default": []
+  },
+  "notice_enabled": {
+    "description": "发送静默提醒",
+    "type": "bool",
+    "hint": "非管理员尝试触发 Bot 时回复一条提醒（同一用户有冷却）",
+    "default": true
+  },
+  "notice_message": {
+    "description": "静默提醒文案",
+    "type": "text",
+    "hint": "支持占位符：{next_open}（今天 08:00）、{next_open_time}（08:00）、{next_open_day}（今天）、{window}（08:00-12:00）、{window_end}（12:00）",
+    "default": "⏰ 现在是 Bot 的休息时间，暂时不能回复消息。\n下次开放时间：{next_open}\n到时候再来找我吧～"
+  },
+  "notice_cooldown_seconds": {
+    "description": "提醒冷却（秒）",
+    "type": "int",
+    "hint": "同一用户在该冷却时间内重复尝试只提醒一次；0 = 每次都提醒",
+    "default": 300
+  },
+  "notice_group_cooldown_seconds": {
+    "description": "群级提醒冷却（秒）",
+    "type": "int",
+    "hint": "同一个群/会话在该冷却时间内最多提醒一次，避免不同群友轮流触发导致刷屏；0 = 关闭",
+    "default": 600
+  },
+  "bypass_admins": {
+    "description": "管理员豁免",
+    "type": "bool",
+    "hint": "开启后 AstrBot 管理员在静默期仍可正常使用",
+    "default": true
+  },
+  "extra_admin_ids": {
+    "description": "额外豁免的账号",
+    "type": "list",
+    "hint": "填写 QQ 号；这些人也视为管理员，不受静默限制",
+    "items": {
+      "type": "string"
+    },
+    "default": []
+  }
+}

@@ -1,0 +1,17 @@
+name: astrbot_plugin_quiet_hours
+display_name: 静默时段
+short_desc: 固定时段暂停非管理员回复，避开 API 价格峰值并自动告知下次开放时间
+desc: >-
+  按固定的每日时间段暂停 Bot 的非管理员回复：静默期内管理员照常使用，
+  其他用户尝试触发时会收到一条可编辑的提醒（含下一次开放时间）。
+  拦截发生在消息入口、LLM 请求和发送前三层，不会消耗模型 token。
+version: 1.1.2
+author: AcceleratorYue
+repo: https://github.com/AcceleratorYue/astrbot_plugin_quiet_hours
+social_link: https://github.com/AcceleratorYue
+astrbot_version: ">=4.16,<5"
+tags:
+  - 静默
+  - 免打扰
+  - token
+  - 节假日
