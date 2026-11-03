@@ -88,8 +88,8 @@ DEFAULT_FEEDBACK = {
     "feedback_silence_on": "已为本群设置单独静默，持续 {duration}，至 {until}。",
     "feedback_silence_off": "已解除本群的单独静默。",
     "feedback_silence_none": "本群当前没有单独静默。",
-    "feedback_silence_invalid": "静默时长格式无效。请使用 _d_h_m 格式，例如 3d12h、2h30m、30m。",
-    "feedback_silence_usage": "用法：/静默 <时长>，例如 /静默 2h30m。",
+    "feedback_silence_invalid": "静默时长格式无效。请使用 1d 12h 30m 格式，例如 3d 12h、2h 30m、30m。",
+    "feedback_silence_usage": "用法：/静默 <时长>，例如 /静默 2h 30m。",
     "feedback_admin_only": "该指令仅限管理员使用。",
     "feedback_group_only": "该指令仅限群聊使用。",
 }
@@ -137,7 +137,7 @@ _WINDOW_RE = re.compile(
     r"^\s*(\d{1,2}):(\d{2})\s*[-~—–至]\s*(\d{1,2}):(\d{2})\s*$"
 )
 _STRICT_DURATION_RE = re.compile(
-    r"^\s*(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?\s*$",
+    r"^\d+[dhm](?: \d+[dhm]){0,2}$",
     re.IGNORECASE,
 )
 _NATURAL_DURATION_RE = re.compile(
@@ -199,18 +199,29 @@ def _duration_from_seconds(seconds: float) -> timedelta | None:
 def parse_duration(raw: Any) -> timedelta | None:
     """解析 /静默 的固定时长格式 *_d_h_m*。
 
-    只接受按天、小时、分钟顺序排列的整数组合，例如：
-    3d12h、2h30m、1d、30m。其他格式（90、1:30、30分钟、1.5h）一律拒绝。
+    单位按天、小时、分钟顺序排列，单位之间必须用一个空格分隔，例如：
+    1d 12h 30m、3d 12h、2h 30m、1d、30m。
+    其他格式（3d12h、2h30m、90、1:30、30分钟、1.5h）一律拒绝。
     """
 
     text = str(raw or "").strip()
-    match = _STRICT_DURATION_RE.fullmatch(text)
-    if not match or not any(part is not None for part in match.groups()):
+    if not _STRICT_DURATION_RE.fullmatch(text):
         return None
-    days, hours, minutes = (int(part) if part is not None else 0 for part in match.groups())
-    if days == 0 and hours == 0 and minutes == 0:
+    parts = text.split(" ")
+    totals = {"d": 0, "h": 0, "m": 0}
+    last_order = -1
+    for part in parts:
+        unit = part[-1].lower()
+        order = "dhm".index(unit)
+        if order <= last_order:
+            return None
+        last_order = order
+        totals[unit] += int(part[:-1])
+    if totals["d"] == 0 and totals["h"] == 0 and totals["m"] == 0:
         return None
-    return _duration_from_seconds(days * 86400 + hours * 3600 + minutes * 60)
+    return _duration_from_seconds(
+        totals["d"] * 86400 + totals["h"] * 3600 + totals["m"] * 60
+    )
 
 
 def parse_natural_duration(text: Any) -> timedelta | None:

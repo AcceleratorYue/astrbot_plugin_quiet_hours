@@ -180,12 +180,12 @@
   "feedback_silence_invalid": {
     "description": "单独静默时长无效的反馈",
     "type": "text",
-    "default": "静默时长格式无效。请使用 _d_h_m 格式，例如 3d12h、2h30m、30m。"
+    "default": "静默时长格式无效。请使用 1d 12h 30m 格式，例如 3d 12h、2h 30m、30m。"
   },
   "feedback_silence_usage": {
     "description": "单独静默缺少参数时的反馈",
     "type": "text",
-    "default": "用法：/静默 <时长>，例如 /静默 2h30m。"
+    "default": "用法：/静默 <时长>，例如 /静默 2h 30m。"
   },
   "feedback_admin_only": {
     "description": "非管理员使用管理员指令的反馈",

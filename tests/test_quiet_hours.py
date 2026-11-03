@@ -697,18 +697,32 @@ def test_notice_template() -> None:
 
 
 def test_duration_parser() -> None:
-    # /静默 只接受 _d_h_m 顺序格式
+    # /静默 只接受 d h m 顺序、单位之间单空格的格式
     cases = {
         "30m": 1800,
         "1h": 3600,
-        "1h30m": 5400,
-        "3d12h": 302400,
-        "2d1h3m": 176580,
+        "2h 30m": 9000,
+        "3d 12h": 302400,
+        "2d 1h 3m": 176580,
+        "1d 12h 30m": 131400,
     }
     for raw, seconds in cases.items():
         parsed = qh.parse_duration(raw)
         assert parsed is not None and parsed.total_seconds() == seconds, (raw, parsed)
-    for raw in ("", "0", "90", "1:30", "30分钟", "1.5h", "1h30", "8d", "1h 30m"):
+    for raw in (
+        "",
+        "0",
+        "90",
+        "1:30",
+        "30分钟",
+        "1.5h",
+        "3d12h",
+        "2h30m",
+        "1h 30m 1d",
+        "1d  12h",
+        "1d 12h 30m 5m",
+        "8d",
+    ):
         assert qh.parse_duration(raw) is None, raw
     assert qh.format_hhmm(59) == "00:01"
     assert qh.format_hhmm(3600) == "01:00"
@@ -722,13 +736,14 @@ def test_duration_parser() -> None:
         "1小时30分钟": 5400,
         "闭嘴一天": 86400,
         "安静3d12h": 302400,
+        "安静 3d 12h": 302400,
     }
     for raw, seconds in natural.items():
         parsed = qh.parse_natural_duration(raw)
         assert parsed is not None and parsed.total_seconds() == seconds, (raw, parsed)
     for raw in ("安静一下", "闭嘴", ""):
         assert qh.parse_natural_duration(raw) is None, raw
-    print("✅ 时长格式：/静默 严格 _d_h_m；自然语言支持中文数字与单位")
+    print("✅ 时长格式：/静默 单位单空格；自然语言支持中文数字与单位")
 
 
 def test_temp_control() -> None:
