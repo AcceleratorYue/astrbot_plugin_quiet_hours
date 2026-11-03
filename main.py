@@ -29,7 +29,7 @@ from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import Plain
+from astrbot.api.message_components import At, Plain
 from astrbot.api.star import Context, Star
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.star.filter.command import CommandFilter
@@ -88,8 +88,8 @@ DEFAULT_FEEDBACK = {
     "feedback_silence_on": "已为本群设置单独静默，持续 {duration}，至 {until}。",
     "feedback_silence_off": "已解除本群的单独静默。",
     "feedback_silence_none": "本群当前没有单独静默。",
-    "feedback_silence_invalid": "静默时长格式无效，请使用 30m、1h、1h30m 等格式。",
-    "feedback_silence_usage": "用法：/静默 <时长>，例如 /静默 30m。",
+    "feedback_silence_invalid": "静默时长格式无效。请使用 _d_h_m 格式，例如 3d12h、2h30m、30m。",
+    "feedback_silence_usage": "用法：/静默 <时长>，例如 /静默 2h30m。",
     "feedback_admin_only": "该指令仅限管理员使用。",
     "feedback_group_only": "该指令仅限群聊使用。",
 }
@@ -118,6 +118,8 @@ DEFAULT_OPTIONS: dict[str, Any] = {
     "notice_group_cooldown_seconds": 600,
     "bypass_admins": True,
     "extra_admin_ids": [],
+    "natural_silence_enabled": True,
+    "natural_silence_keywords": ["安静", "闭嘴"],
     **DEFAULT_FEEDBACK,
 }
 
@@ -134,49 +136,112 @@ _WINDOW_SPLIT_RE = re.compile(r"[,;，；、\n]+")
 _WINDOW_RE = re.compile(
     r"^\s*(\d{1,2}):(\d{2})\s*[-~—–至]\s*(\d{1,2}):(\d{2})\s*$"
 )
-_DURATION_RE = re.compile(
-    r"^\s*(?:(\d+(?:\.\d+)?)\s*(?:d|day|days|天))?"
-    r"\s*(?:(\d+(?:\.\d+)?)\s*(?:h|hr|hrs|hour|hours|小时|时))?"
-    r"\s*(?:(\d+(?:\.\d+)?)\s*(?:m|min|mins|minute|minutes|分钟|分))?"
-    r"\s*(?:(\d+(?:\.\d+)?)\s*(?:s|sec|secs|second|seconds|秒))?\s*$",
+_STRICT_DURATION_RE = re.compile(
+    r"^\s*(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?\s*$",
     re.IGNORECASE,
 )
-_HHMM_RE = re.compile(r"^\s*(\d{1,4}):(\d{2})\s*$")
+_NATURAL_DURATION_RE = re.compile(
+    r"(?P<num>\d+(?:\.\d+)?|[零一二两三四五六七八九十百]+|半)\s*"
+    r"(?P<unit>天|日|d(?:ays?)?|小时|时|h(?:rs?|ours?)?|分钟|分|m(?:in(?:ute)?s?)?|秒钟?|s(?:ec(?:ond)?s?)?)",
+    re.IGNORECASE,
+)
+
+_CN_DIGITS = {
+    "零": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
 
 
-def parse_duration(raw: Any) -> timedelta | None:
-    """解析临时静默时长。
-
-    支持 30m、1h、1h30m、90、1.5h、1:30、30分钟、1小时30分等写法。
-    不带单位的纯数字按“分钟”处理；空值、0、负数或超过 7 天的时长返回 None。
-    """
-
-    text = str(raw or "").strip()
+def _parse_natural_number(token: str) -> float | None:
+    text = token.strip()
     if not text:
         return None
-    hhmm = _HHMM_RE.match(text)
-    if hhmm:
-        hours, minutes = int(hhmm.group(1)), int(hhmm.group(2))
-        if minutes >= 60:
-            return None
-        seconds = hours * 3600 + minutes * 60
-    else:
-        match = _DURATION_RE.match(text)
-        if match and any(part is not None for part in match.groups()):
-            days, hours, minutes, secs = (
-                float(part) if part is not None else 0.0 for part in match.groups()
-            )
-            seconds = days * 86400 + hours * 3600 + minutes * 60 + secs
-        elif text.replace(".", "", 1).isdigit():
-            seconds = float(text) * 60
-        else:
-            return None
+    if text == "半":
+        return 0.5
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    if any(ch not in _CN_DIGITS and ch not in {"十", "百"} for ch in text):
+        return None
+    total = 0
+    current = 0
+    for ch in text:
+        if ch in _CN_DIGITS:
+            current = _CN_DIGITS[ch]
+        elif ch == "十":
+            total += (current or 1) * 10
+            current = 0
+        elif ch == "百":
+            total += (current or 1) * 100
+            current = 0
+    return float(total + current)
+
+
+def _duration_from_seconds(seconds: float) -> timedelta | None:
     if not math.isfinite(seconds) or seconds <= 0:
         return None
     duration = timedelta(seconds=seconds)
     if duration > MAX_TEMP_SILENCE:
         return None
     return duration
+
+
+def parse_duration(raw: Any) -> timedelta | None:
+    """解析 /静默 的固定时长格式 *_d_h_m*。
+
+    只接受按天、小时、分钟顺序排列的整数组合，例如：
+    3d12h、2h30m、1d、30m。其他格式（90、1:30、30分钟、1.5h）一律拒绝。
+    """
+
+    text = str(raw or "").strip()
+    match = _STRICT_DURATION_RE.fullmatch(text)
+    if not match or not any(part is not None for part in match.groups()):
+        return None
+    days, hours, minutes = (int(part) if part is not None else 0 for part in match.groups())
+    if days == 0 and hours == 0 and minutes == 0:
+        return None
+    return _duration_from_seconds(days * 86400 + hours * 3600 + minutes * 60)
+
+
+def parse_natural_duration(text: Any) -> timedelta | None:
+    """从自然语言里提取时长，支持中文数字和单位。
+
+    示例：五分钟、一天、半小时、1小时30分钟、3d12h。
+    """
+
+    content = str(text or "").strip()
+    if not content:
+        return None
+    total_seconds = 0.0
+    found = False
+    for match in _NATURAL_DURATION_RE.finditer(content):
+        number = _parse_natural_number(match.group("num"))
+        if number is None:
+            continue
+        unit = match.group("unit").lower()
+        if unit in {"天", "日"} or unit.startswith("d"):
+            multiplier = 86400
+        elif unit in {"小时", "时"} or unit.startswith("h"):
+            multiplier = 3600
+        elif unit in {"分钟", "分"} or unit.startswith("m"):
+            multiplier = 60
+        else:
+            multiplier = 1
+        total_seconds += number * multiplier
+        found = True
+    if not found:
+        return None
+    return _duration_from_seconds(total_seconds)
 
 
 def format_hhmm(seconds: float) -> str:
@@ -1065,6 +1130,23 @@ class QuietHoursPlugin(Star):
         return bool(getattr(event, "is_at_or_wake_command", False))
 
     @staticmethod
+    def _is_at_bot(event: AstrMessageEvent) -> bool:
+        """是否在消息段里明确 @ 了 bot。"""
+
+        try:
+            messages = event.get_messages() or []
+        except Exception:
+            return False
+        try:
+            bot_id = str(event.get_self_id() or "")
+        except Exception:
+            return False
+        for comp in messages:
+            if isinstance(comp, At) and str(getattr(comp, "qq", "") or "") == bot_id:
+                return True
+        return False
+
+    @staticmethod
     def _is_own_command(event: AstrMessageEvent) -> bool:
         text = (getattr(event, "message_str", "") or "").strip()
         if not text:
@@ -1580,6 +1662,52 @@ class QuietHoursPlugin(Star):
             return "feedback_group_only"
         return None
 
+    def _set_temp_silence(
+        self, event: AstrMessageEvent, duration: timedelta
+    ) -> datetime:
+        group_id = self._group_id(event)
+        now = self._now()
+        until = now + duration
+        self._temp_silences[group_id] = until.timestamp()
+        self._save_state()
+        return until
+
+    @filter.event_message_type(
+        filter.EventMessageType.ALL,
+        priority=1000001,
+    )
+    async def natural_silence_trigger(self, event: AstrMessageEvent):
+        """（管理员，@bot）从自然语言中识别“安静 / 闭嘴 + 时长”。"""
+
+        if not self._bool_opt("natural_silence_enabled"):
+            return
+        if not self._is_bot_admin(event):
+            return
+        if not self._is_at_bot(event):
+            return
+        group_id = self._group_id(event)
+        if not group_id:
+            return
+        keywords = self._list_opt("natural_silence_keywords")
+        text = str(getattr(event, "message_str", "") or "")
+        lowered = text.lower()
+        if not keywords or not any(keyword.lower() in lowered for keyword in keywords):
+            return
+        duration = parse_natural_duration(text)
+        if duration is None:
+            return
+        until = self._set_temp_silence(event, duration)
+        event.set_extra("_quiet_hours_allow_result", True)
+        event.stop_event()
+        yield event.plain_result(
+            self._render_feedback(
+                "feedback_silence_on",
+                duration=format_duration(duration.total_seconds()),
+                until=format_moment(until, self._now()),
+                remaining=format_hhmm(duration.total_seconds()),
+            )
+        )
+
     @filter.command("豁免")
     async def cmd_exempt(self, event: AstrMessageEvent):
         """（管理员，群聊）为当前群临时豁免静默。"""
@@ -1631,11 +1759,8 @@ class QuietHoursPlugin(Star):
         if duration is None:
             yield event.plain_result(self._render_feedback("feedback_silence_invalid"))
             return
-        group_id = self._group_id(event)
         now = self._now()
-        until = now + duration
-        self._temp_silences[group_id] = until.timestamp()
-        self._save_state()
+        until = self._set_temp_silence(event, duration)
         yield event.plain_result(
             self._render_feedback(
                 "feedback_silence_on",

@@ -63,12 +63,14 @@ class FakeEvent:
         sender: str = "10001",
         umo: str = "test:GroupMessage:123456",
         self_id: str = BOT_ID,
+        messages: list | None = None,
     ) -> None:
         self._admin = admin
         self._group = group
         self._private = private
         self._sender = sender
         self._self_id = self_id
+        self._messages = messages or []
         self.is_at_or_wake_command = wake
         self.is_wake = wake
         self.message_str = text
@@ -77,6 +79,9 @@ class FakeEvent:
         self.stopped = False
         self.extras: dict = {}
         self.result = None
+
+    def get_messages(self):
+        return self._messages
 
     def is_admin(self) -> bool:
         return self._admin
@@ -692,26 +697,38 @@ def test_notice_template() -> None:
 
 
 def test_duration_parser() -> None:
+    # /静默 只接受 _d_h_m 顺序格式
     cases = {
         "30m": 1800,
-        "30分钟": 1800,
         "1h": 3600,
-        "1.5h": 5400,
         "1h30m": 5400,
-        "1小时30分": 5400,
-        "90": 5400,
-        "1:30": 5400,
-        "2d": 172800,
+        "3d12h": 302400,
+        "2d1h3m": 176580,
     }
     for raw, seconds in cases.items():
         parsed = qh.parse_duration(raw)
         assert parsed is not None and parsed.total_seconds() == seconds, (raw, parsed)
-    for raw in ("", "0", "-1", "abc", "8d", "1h30"):
+    for raw in ("", "0", "90", "1:30", "30分钟", "1.5h", "1h30", "8d", "1h 30m"):
         assert qh.parse_duration(raw) is None, raw
     assert qh.format_hhmm(59) == "00:01"
     assert qh.format_hhmm(3600) == "01:00"
     assert qh.format_hhmm(3661) == "01:02"
-    print("✅ 单独静默时长解析：分钟/小时/复合/冒号/中文单位")
+
+    # 自然语言时长
+    natural = {
+        "五分钟": 300,
+        "一天": 86400,
+        "半小时": 1800,
+        "1小时30分钟": 5400,
+        "闭嘴一天": 86400,
+        "安静3d12h": 302400,
+    }
+    for raw, seconds in natural.items():
+        parsed = qh.parse_natural_duration(raw)
+        assert parsed is not None and parsed.total_seconds() == seconds, (raw, parsed)
+    for raw in ("安静一下", "闭嘴", ""):
+        assert qh.parse_natural_duration(raw) is None, raw
+    print("✅ 时长格式：/静默 严格 _d_h_m；自然语言支持中文数字与单位")
 
 
 def test_temp_control() -> None:
@@ -775,6 +792,59 @@ def test_temp_control() -> None:
 
     asyncio.run(run())
     print("✅ 临时控制：单独静默优先 / 豁免互斥 / 定时静默回退 / 权限与模板")
+
+
+def test_natural_silence_trigger() -> None:
+    async def run() -> None:
+        plugin = make_plugin({"time_windows": ["09:00-12:00"]})
+        at_bot = qh.At(qq=BOT_ID)
+        event = FakeEvent(
+            admin=True,
+            text="闭嘴一天",
+            messages=[at_bot, qh.Plain("闭嘴一天")],
+        )
+        result = [item async for item in plugin.natural_silence_trigger(event)]
+        assert result and "单独静默" in result[0][1], result
+        assert event.stopped
+        state, temp_until = plugin._effective_quiet(event)
+        assert state.active and temp_until is not None
+
+        # 非管理员：不触发，也不改状态
+        normal_plugin = make_plugin({"time_windows": ["09:00-12:00"]})
+        non_admin = FakeEvent(
+            admin=False,
+            text="安静五分钟",
+            messages=[qh.At(qq=BOT_ID), qh.Plain("安静五分钟")],
+        )
+        result = [item async for item in normal_plugin.natural_silence_trigger(non_admin)]
+        assert not result and "123456" not in normal_plugin._temp_silences
+
+        # 管理员但没有 @bot：不触发
+        no_at = FakeEvent(admin=True, text="安静五分钟")
+        result = [item async for item in normal_plugin.natural_silence_trigger(no_at)]
+        assert not result
+
+        # 有 @bot 和关键词，但没有时长：不触发
+        no_duration = FakeEvent(
+            admin=True,
+            text="安静一下",
+            messages=[qh.At(qq=BOT_ID), qh.Plain("安静一下")],
+        )
+        result = [item async for item in normal_plugin.natural_silence_trigger(no_duration)]
+        assert not result
+
+        # 自定义关键词
+        custom = make_plugin({"natural_silence_keywords": ["小点声"]})
+        custom_event = FakeEvent(
+            admin=True,
+            text="小点声 半小时",
+            messages=[qh.At(qq=BOT_ID), qh.Plain("小点声 半小时")],
+        )
+        result = [item async for item in custom.natural_silence_trigger(custom_event)]
+        assert result and "单独静默" in result[0][1], result
+
+    asyncio.run(run())
+    print("✅ 自然语言触发：仅管理员 @bot；关键词可配置；非管理员不触发")
 
 
 def test_state_persistence() -> None:
@@ -871,6 +941,7 @@ def main() -> int:
         test_notice_template()
         test_duration_parser()
         test_temp_control()
+        test_natural_silence_trigger()
         test_state_persistence()
         test_loader()
     except AssertionError:

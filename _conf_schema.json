@@ -125,6 +125,21 @@
     },
     "default": []
   },
+  "natural_silence_enabled": {
+    "description": "启用自然语言单独静默",
+    "type": "bool",
+    "hint": "管理员 @Bot 且消息包含下方关键词和明确时长时，自动开启单独静默；非管理员不会触发",
+    "default": true
+  },
+  "natural_silence_keywords": {
+    "description": "自然语言触发关键词",
+    "type": "list",
+    "hint": "管理员 @Bot 的句子中命中任一关键词且包含时长（如“安静五分钟”“闭嘴一天”）时触发；非管理员不触发",
+    "items": {
+      "type": "string"
+    },
+    "default": ["安静", "闭嘴"]
+  },
   "feedback_exempt_on": {
     "description": "启用群豁免后的反馈",
     "type": "text",
@@ -165,12 +180,12 @@
   "feedback_silence_invalid": {
     "description": "单独静默时长无效的反馈",
     "type": "text",
-    "default": "静默时长格式无效，请使用 30m、1h、1h30m 等格式。"
+    "default": "静默时长格式无效。请使用 _d_h_m 格式，例如 3d12h、2h30m、30m。"
   },
   "feedback_silence_usage": {
     "description": "单独静默缺少参数时的反馈",
     "type": "text",
-    "default": "用法：/静默 <时长>，例如 /静默 30m。"
+    "default": "用法：/静默 <时长>，例如 /静默 2h30m。"
   },
   "feedback_admin_only": {
     "description": "非管理员使用管理员指令的反馈",
