@@ -1489,8 +1489,8 @@ class QuietHoursPlugin(Star):
         lines.append(f"· 范围：{scope_text}；静默强度：{mode_text}；时区：{tz_name}")
         lines.append(f"· 管理员豁免：{'开' if self._bool_opt('bypass_admins') else '关'}")
         group_id = self._group_id(event)
+        temp_until = self._temp_silence_until(event) if group_id else None
         if group_id:
-            temp_until = self._temp_silence_until(event)
             if temp_until is not None:
                 remaining = (temp_until - now).total_seconds()
                 lines.append(
@@ -1504,7 +1504,19 @@ class QuietHoursPlugin(Star):
             lines.append(
                 "· 保留插件：" + ("、".join(context_plugins) if context_plugins else "无")
             )
-        if state.active and state.interval is not None:
+        if temp_until is not None:
+            remaining = (temp_until - now).total_seconds()
+            lines.append(
+                f"· 当前：单独静默中，至 {format_moment(temp_until, now)}，"
+                f"还剩 {format_duration(remaining)}"
+            )
+            lines.append(f"· 下次开放：{format_moment(temp_until, now)}")
+        elif group_id and group_id in self._exempt_groups:
+            lines.append("· 当前：本群临时豁免中，正常回复")
+            if state.next_quiet is not None:
+                start_dt, _end_dt = state.next_quiet
+                lines.append(f"· 下次静默开始：{format_moment(start_dt, now)}")
+        elif state.active and state.interval is not None:
             start_dt, end_dt = state.interval
             remaining = (end_dt - now).total_seconds()
             active_names = active_scheme_names(now, schemes, self._holidays, holidays_enabled)
@@ -1531,18 +1543,26 @@ class QuietHoursPlugin(Star):
             yield event.plain_result("该指令需要管理员权限。")
             return
         now = self._now()
-        _enabled, _mode, schemes, _scope, _context = self._config_snapshot()
-        state = query_scheme_state(
-            now, schemes, self._holidays, self._bool_opt("holiday_enabled")
-        )
-        if state.interval is None:
-            # 不在静默时段也给出一个示例时间，方便预览模板
+        temp_until = self._temp_silence_until(event)
+        if temp_until is not None:
             state = QuietState(
                 active=True,
-                interval=(now, now + timedelta(hours=1)),
-                next_open=now + timedelta(hours=1),
+                interval=(now, temp_until),
+                next_open=temp_until,
             )
-        text = self._render_notice(state, now)
+        else:
+            _enabled, _mode, schemes, _scope, _context = self._config_snapshot()
+            state = query_scheme_state(
+                now, schemes, self._holidays, self._bool_opt("holiday_enabled")
+            )
+            if state.interval is None:
+                # 不在静默时段也给出一个示例时间，方便预览模板
+                state = QuietState(
+                    active=True,
+                    interval=(now, now + timedelta(hours=1)),
+                    next_open=now + timedelta(hours=1),
+                )
+        text = self._render_notice(state, now, temp_until)
         yield event.plain_result(f"静默提醒预览：\n——\n{text}\n——")
 
     # -- 管理员临时控制 ----------------------------------------------------

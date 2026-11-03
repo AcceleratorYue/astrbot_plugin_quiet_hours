@@ -727,6 +727,11 @@ def test_temp_control() -> None:
         assert "剩余 00:30" in notice, notice
         assert "下次开放时间" not in notice, notice  # 单独静默提醒优先
 
+        status = [item async for item in plugin.cmd_status(event)]
+        assert "单独静默中" in status[0][1], status
+        preview = [item async for item in plugin.cmd_test_notice(event)]
+        assert "剩余 00:30" in preview[0][1], preview
+
         blocked = [item async for item in plugin.cmd_exempt(event)]
         assert "无法使用豁免" in blocked[0][1], blocked
 
