@@ -11,13 +11,14 @@
 3. 发送前：兜底清空其他插件生成的回复内容（针对不经过 LLM 的直接回复插件）。
 
 作者：AcceleratorYue
-版本：1.1.2
+版本：1.2.0
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 import time as time_module
 import urllib.request
@@ -53,12 +54,13 @@ except Exception:  # pragma: no cover
         pass
 
 
-PLUGIN_VERSION = "1.1.2"
+PLUGIN_VERSION = "1.2.0"
 LOG_PREFIX = "[静默时段]"
 
 STATUS_COMMANDS = ("静默状态", "免打扰状态", "静默查询")
 TEST_COMMANDS = ("静默测试",)
-ALL_OWN_COMMANDS = set(STATUS_COMMANDS) | set(TEST_COMMANDS)
+ADMIN_COMMANDS = ("豁免", "解除豁免", "静默", "解除静默")
+ALL_OWN_COMMANDS = set(STATUS_COMMANDS) | set(TEST_COMMANDS) | set(ADMIN_COMMANDS)
 
 WEEKDAY_LABELS = {
     1: "周一",
@@ -75,6 +77,22 @@ DEFAULT_NOTICE = (
     "下次开放时间：{next_open}\n"
     "到时候再来找我吧～"
 )
+
+DEFAULT_TEMP_NOTICE = "本群当前处于单独静默，剩余 {remaining}。"
+
+DEFAULT_FEEDBACK = {
+    "feedback_exempt_on": "已为本群开启临时静默豁免。",
+    "feedback_exempt_off": "已解除本群的临时静默豁免。",
+    "feedback_exempt_none": "本群当前没有临时静默豁免。",
+    "feedback_exempt_blocked": "本群当前处于单独静默，无法使用豁免。",
+    "feedback_silence_on": "已为本群设置单独静默，持续 {duration}，至 {until}。",
+    "feedback_silence_off": "已解除本群的单独静默。",
+    "feedback_silence_none": "本群当前没有单独静默。",
+    "feedback_silence_invalid": "静默时长格式无效，请使用 30m、1h、1h30m 等格式。",
+    "feedback_silence_usage": "用法：/静默 <时长>，例如 /静默 30m。",
+    "feedback_admin_only": "该指令仅限管理员使用。",
+    "feedback_group_only": "该指令仅限群聊使用。",
+}
 
 DEFAULT_OPTIONS: dict[str, Any] = {
     "enabled": True,
@@ -95,14 +113,18 @@ DEFAULT_OPTIONS: dict[str, Any] = {
     "context_plugins": [],
     "notice_enabled": True,
     "notice_message": DEFAULT_NOTICE,
+    "temp_silence_notice": DEFAULT_TEMP_NOTICE,
     "notice_cooldown_seconds": 300,
     "notice_group_cooldown_seconds": 600,
     "bypass_admins": True,
     "extra_admin_ids": [],
+    **DEFAULT_FEEDBACK,
 }
 
 HOLIDAY_DATA_FILE = "holidays_cn.json"
 HOLIDAY_CACHE_FILE = "holidays_cache.json"
+STATE_FILE = "quiet_hours_state.json"
+MAX_TEMP_SILENCE = timedelta(days=7)
 DEFAULT_HOLIDAY_URL = (
     "https://cdn.jsdelivr.net/gh/NateScarlet/holiday-cn@master/{year}.json"
 )
@@ -112,6 +134,57 @@ _WINDOW_SPLIT_RE = re.compile(r"[,;，；、\n]+")
 _WINDOW_RE = re.compile(
     r"^\s*(\d{1,2}):(\d{2})\s*[-~—–至]\s*(\d{1,2}):(\d{2})\s*$"
 )
+_DURATION_RE = re.compile(
+    r"^\s*(?:(\d+(?:\.\d+)?)\s*(?:d|day|days|天))?"
+    r"\s*(?:(\d+(?:\.\d+)?)\s*(?:h|hr|hrs|hour|hours|小时|时))?"
+    r"\s*(?:(\d+(?:\.\d+)?)\s*(?:m|min|mins|minute|minutes|分钟|分))?"
+    r"\s*(?:(\d+(?:\.\d+)?)\s*(?:s|sec|secs|second|seconds|秒))?\s*$",
+    re.IGNORECASE,
+)
+_HHMM_RE = re.compile(r"^\s*(\d{1,4}):(\d{2})\s*$")
+
+
+def parse_duration(raw: Any) -> timedelta | None:
+    """解析临时静默时长。
+
+    支持 30m、1h、1h30m、90、1.5h、1:30、30分钟、1小时30分等写法。
+    不带单位的纯数字按“分钟”处理；空值、0、负数或超过 7 天的时长返回 None。
+    """
+
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    hhmm = _HHMM_RE.match(text)
+    if hhmm:
+        hours, minutes = int(hhmm.group(1)), int(hhmm.group(2))
+        if minutes >= 60:
+            return None
+        seconds = hours * 3600 + minutes * 60
+    else:
+        match = _DURATION_RE.match(text)
+        if match and any(part is not None for part in match.groups()):
+            days, hours, minutes, secs = (
+                float(part) if part is not None else 0.0 for part in match.groups()
+            )
+            seconds = days * 86400 + hours * 3600 + minutes * 60 + secs
+        elif text.replace(".", "", 1).isdigit():
+            seconds = float(text) * 60
+        else:
+            return None
+    if not math.isfinite(seconds) or seconds <= 0:
+        return None
+    duration = timedelta(seconds=seconds)
+    if duration > MAX_TEMP_SILENCE:
+        return None
+    return duration
+
+
+def format_hhmm(seconds: float) -> str:
+    """把剩余秒数格式化为 hh:mm（向上取整到分钟，避免结束前显示 00:00）。"""
+
+    total_minutes = max(0, math.ceil(max(0.0, seconds) / 60.0))
+    hours, minutes = divmod(total_minutes, 60)
+    return f"{hours:02d}:{minutes:02d}"
 
 
 # ---------------------------------------------------------------------------
@@ -634,7 +707,11 @@ class QuietHoursPlugin(Star):
         self._snapshot_value: tuple | None = None
         self._holidays: dict[date, tuple[str, bool]] = load_bundled_holidays()
         self._holiday_cache_path = self._resolve_cache_path()
+        self._state_path = self._resolve_state_path()
+        self._exempt_groups: set[str] = set()
+        self._temp_silences: dict[str, float] = {}
         self._load_holiday_cache()
+        self._load_state()
         self._holiday_refresh_task: asyncio.Task | None = None
         logger.info(f"{LOG_PREFIX} 插件 v{PLUGIN_VERSION} 已加载")
 
@@ -670,7 +747,76 @@ class QuietHoursPlugin(Star):
         count = merge_holiday_payload(self._holidays, payload)
         logger.debug(f"{LOG_PREFIX} 已从缓存合入 {count} 条节假日记录")
 
+    def _resolve_state_path(self) -> Path | None:
+        try:
+            if self._holiday_cache_path is not None:
+                return self._holiday_cache_path.with_name(STATE_FILE)
+            if get_astrbot_plugin_data_path is not None:
+                base = Path(get_astrbot_plugin_data_path()) / "astrbot_plugin_quiet_hours"
+                base.mkdir(parents=True, exist_ok=True)
+                return base / STATE_FILE
+            return Path(__file__).with_name("data") / STATE_FILE
+        except Exception:
+            return None
+
+    def _load_state(self) -> None:
+        path = self._state_path
+        if path is None or not path.is_file():
+            return
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning(f"{LOG_PREFIX} 读取临时状态失败：{exc}")
+            return
+        if not isinstance(payload, dict):
+            return
+        raw_exempt = payload.get("exempt_groups")
+        if isinstance(raw_exempt, list):
+            self._exempt_groups = {
+                str(group_id).strip()
+                for group_id in raw_exempt
+                if str(group_id).strip()
+            }
+        raw_temp = payload.get("temp_silences")
+        if isinstance(raw_temp, dict):
+            now = time_module.time()
+            self._temp_silences = {}
+            for group_id, until in raw_temp.items():
+                try:
+                    until_ts = float(until)
+                except (TypeError, ValueError):
+                    continue
+                if until_ts > now and str(group_id).strip():
+                    self._temp_silences[str(group_id).strip()] = until_ts
+        logger.debug(
+            f"{LOG_PREFIX} 已载入状态：豁免 {len(self._exempt_groups)} 个群，"
+            f"单独静默 {len(self._temp_silences)} 个群"
+        )
+
+    def _save_state(self) -> None:
+        path = self._state_path
+        if path is None:
+            return
+        payload = {
+            "exempt_groups": sorted(self._exempt_groups),
+            "temp_silences": {
+                group_id: until for group_id, until in sorted(self._temp_silences.items())
+            },
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = path.with_name(f"{path.name}.tmp")
+            temp_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temp_path.replace(path)
+        except Exception as exc:
+            logger.warning(f"{LOG_PREFIX} 写入临时状态失败：{exc}")
+
     async def _refresh_holidays(self) -> None:
+        """插件启用后自动更新当年/次年法定节假日数据（后台，失败不影响使用）。"""
+
         template = str(self._opt("holiday_update_url") or "").strip() or DEFAULT_HOLIDAY_URL
         current_year = self._now().year
         merged: dict[date, tuple[str, bool]] = {}
@@ -819,6 +965,55 @@ class QuietHoursPlugin(Star):
             holidays_enabled,
         )
 
+    @staticmethod
+    def _group_id(event: AstrMessageEvent) -> str:
+        try:
+            return str(event.get_group_id() or "").strip()
+        except Exception:
+            return ""
+
+    def _is_group_exempt(self, event: AstrMessageEvent) -> bool:
+        group_id = self._group_id(event)
+        return bool(group_id and group_id in self._exempt_groups)
+
+    def _temp_silence_until(self, event: AstrMessageEvent) -> datetime | None:
+        group_id = self._group_id(event)
+        if not group_id:
+            return None
+        until_ts = self._temp_silences.get(group_id)
+        if until_ts is None:
+            return None
+        now = self._now()
+        if until_ts <= now.timestamp():
+            self._temp_silences.pop(group_id, None)
+            self._save_state()
+            return None
+        return datetime.fromtimestamp(until_ts, tz=now.tzinfo)
+
+    def _effective_quiet(
+        self, event: AstrMessageEvent
+    ) -> tuple[QuietState, datetime | None]:
+        """返回当前会话的真实静默状态。
+
+        单独静默优先于群豁免和定时静默；群豁免只影响所在群。
+        第二个返回值仅在“单独静默”生效时非空，用于选择单独静默提示模板。
+        """
+
+        temp_until = self._temp_silence_until(event)
+        if temp_until is not None:
+            now = self._now()
+            return (
+                QuietState(
+                    active=True,
+                    interval=(now, temp_until),
+                    next_open=temp_until,
+                ),
+                temp_until,
+            )
+        if self._is_group_exempt(event):
+            return QuietState(), None
+        return self._quiet_now(), None
+
     def _in_scope(self, event: AstrMessageEvent) -> bool:
         scope = str(self._opt("scope") or "all").strip().lower()
         if scope == "groups":
@@ -874,7 +1069,7 @@ class QuietHoursPlugin(Star):
         text = (getattr(event, "message_str", "") or "").strip()
         if not text:
             return False
-        first = re.split(r"\s+", text, maxsplit=1)[0]
+        first = re.split(r"\s+", text, maxsplit=1)[0].lstrip("/")
         return first in ALL_OWN_COMMANDS
 
     @staticmethod
@@ -905,7 +1100,36 @@ class QuietHoursPlugin(Star):
 
     # -- 提醒 -------------------------------------------------------------
 
-    def _render_notice(self, state: QuietState, now: datetime) -> str:
+    def _render_feedback(self, key: str, **values: Any) -> str:
+        """渲染指令反馈模板；支持 {name} 占位符和 \n 换行。"""
+
+        template = str(
+            self._opt(key) or DEFAULT_OPTIONS.get(key) or DEFAULT_FEEDBACK.get(key, "")
+        )
+        for name, value in values.items():
+            template = template.replace("{" + name + "}", str(value))
+        return template.replace("\\n", "\n").strip()
+
+    def _render_notice(
+        self,
+        state: QuietState,
+        now: datetime,
+        temp_until: datetime | None = None,
+    ) -> str:
+        if temp_until is not None:
+            template = str(self._opt("temp_silence_notice") or DEFAULT_TEMP_NOTICE)
+            remaining_seconds = (temp_until - now).total_seconds()
+            values = {
+                "remaining": format_hhmm(remaining_seconds),
+                "until": format_moment(temp_until, now),
+                "window": "单独静默",
+                "window_end": f"{temp_until:%H:%M}",
+            }
+            text = template
+            for key, value in values.items():
+                text = text.replace("{" + key + "}", value)
+            return text.replace("\\n", "\n").strip()
+
         template = str(self._opt("notice_message") or DEFAULT_NOTICE)
         interval = state.interval
         if state.next_open is not None:
@@ -964,10 +1188,15 @@ class QuietHoursPlugin(Star):
             }
         return True
 
-    async def _send_notice(self, event: AstrMessageEvent, state: QuietState) -> None:
+    async def _send_notice(
+        self,
+        event: AstrMessageEvent,
+        state: QuietState,
+        temp_until: datetime | None = None,
+    ) -> None:
         if not self._notice_allowed(event):
             return
-        text = self._render_notice(state, self._now())
+        text = self._render_notice(state, self._now(), temp_until)
         if not text:
             return
         # 如果已经装上了“禁止直接发送”的保护，这里用原始 send 发提醒
@@ -1096,7 +1325,7 @@ class QuietHoursPlugin(Star):
             return
         if self._is_own_command(event):
             return
-        state = self._quiet_now()
+        state, temp_until = self._effective_quiet(event)
         if not state.active:
             return
 
@@ -1107,7 +1336,7 @@ class QuietHoursPlugin(Star):
         is_trigger = self._is_wake_attempt(event) or self._is_poke_event(event)
 
         if is_trigger:
-            await self._send_notice(event, state)
+            await self._send_notice(event, state, temp_until)
             # 保留上下文时，连唤醒消息也交给白名单插件记录
             await self._run_context_handlers(event, context_handlers)
             event.stop_event()
@@ -1138,7 +1367,7 @@ class QuietHoursPlugin(Star):
             return
         if not self._in_scope(event):
             return
-        state = self._quiet_now()
+        state, _temp_until = self._effective_quiet(event)
         if not state.active:
             return
         self._install_send_guard(event)
@@ -1156,7 +1385,7 @@ class QuietHoursPlugin(Star):
             return
         if not self._in_scope(event):
             return
-        state = self._quiet_now()
+        state, _temp_until = self._effective_quiet(event)
         if not state.active:
             return
         try:
@@ -1190,7 +1419,7 @@ class QuietHoursPlugin(Star):
                 return
         except Exception:
             pass
-        state = self._quiet_now()
+        state, _temp_until = self._effective_quiet(event)
         if not state.active:
             return
         result = event.get_result()
@@ -1259,6 +1488,18 @@ class QuietHoursPlugin(Star):
             )
         lines.append(f"· 范围：{scope_text}；静默强度：{mode_text}；时区：{tz_name}")
         lines.append(f"· 管理员豁免：{'开' if self._bool_opt('bypass_admins') else '关'}")
+        group_id = self._group_id(event)
+        if group_id:
+            temp_until = self._temp_silence_until(event)
+            if temp_until is not None:
+                remaining = (temp_until - now).total_seconds()
+                lines.append(
+                    f"· 本群单独静默：至 {format_moment(temp_until, now)}，"
+                    f"剩余 {format_hhmm(remaining)}"
+                )
+            lines.append(
+                f"· 本群临时豁免：{'开' if group_id in self._exempt_groups else '关'}"
+            )
         if mode == "keep_context":
             lines.append(
                 "· 保留插件：" + ("、".join(context_plugins) if context_plugins else "无")
@@ -1303,6 +1544,103 @@ class QuietHoursPlugin(Star):
             )
         text = self._render_notice(state, now)
         yield event.plain_result(f"静默提醒预览：\n——\n{text}\n——")
+
+    # -- 管理员临时控制 ----------------------------------------------------
+
+    @staticmethod
+    def _command_arg(event: AstrMessageEvent) -> str:
+        text = str(getattr(event, "message_str", "") or "").strip()
+        parts = text.split(maxsplit=1)
+        return parts[1].strip() if len(parts) > 1 else ""
+
+    def _admin_command_rejection(self, event: AstrMessageEvent) -> str | None:
+        if not self._is_bot_admin(event):
+            return "feedback_admin_only"
+        if not self._group_id(event):
+            return "feedback_group_only"
+        return None
+
+    @filter.command("豁免")
+    async def cmd_exempt(self, event: AstrMessageEvent):
+        """（管理员，群聊）为当前群临时豁免静默。"""
+
+        event.set_extra("_quiet_hours_allow_result", True)
+        rejection = self._admin_command_rejection(event)
+        if rejection is not None:
+            yield event.plain_result(self._render_feedback(rejection))
+            return
+        group_id = self._group_id(event)
+        if self._temp_silence_until(event) is not None:
+            yield event.plain_result(self._render_feedback("feedback_exempt_blocked"))
+            return
+        self._exempt_groups.add(group_id)
+        self._save_state()
+        yield event.plain_result(self._render_feedback("feedback_exempt_on"))
+
+    @filter.command("解除豁免")
+    async def cmd_unexempt(self, event: AstrMessageEvent):
+        """（管理员，群聊）解除当前群的临时静默豁免。"""
+
+        event.set_extra("_quiet_hours_allow_result", True)
+        rejection = self._admin_command_rejection(event)
+        if rejection is not None:
+            yield event.plain_result(self._render_feedback(rejection))
+            return
+        group_id = self._group_id(event)
+        if group_id not in self._exempt_groups:
+            yield event.plain_result(self._render_feedback("feedback_exempt_none"))
+            return
+        self._exempt_groups.discard(group_id)
+        self._save_state()
+        yield event.plain_result(self._render_feedback("feedback_exempt_off"))
+
+    @filter.command("静默")
+    async def cmd_temp_silence(self, event: AstrMessageEvent):
+        """（管理员，群聊）为当前群设置一次性单独静默，例如 /静默 30m。"""
+
+        event.set_extra("_quiet_hours_allow_result", True)
+        rejection = self._admin_command_rejection(event)
+        if rejection is not None:
+            yield event.plain_result(self._render_feedback(rejection))
+            return
+        raw = self._command_arg(event)
+        if not raw:
+            yield event.plain_result(self._render_feedback("feedback_silence_usage"))
+            return
+        duration = parse_duration(raw)
+        if duration is None:
+            yield event.plain_result(self._render_feedback("feedback_silence_invalid"))
+            return
+        group_id = self._group_id(event)
+        now = self._now()
+        until = now + duration
+        self._temp_silences[group_id] = until.timestamp()
+        self._save_state()
+        yield event.plain_result(
+            self._render_feedback(
+                "feedback_silence_on",
+                duration=format_duration(duration.total_seconds()),
+                until=format_moment(until, now),
+                remaining=format_hhmm(duration.total_seconds()),
+            )
+        )
+
+    @filter.command("解除静默")
+    async def cmd_clear_temp_silence(self, event: AstrMessageEvent):
+        """（管理员，群聊）只解除当前群的单独静默，不影响定时静默。"""
+
+        event.set_extra("_quiet_hours_allow_result", True)
+        rejection = self._admin_command_rejection(event)
+        if rejection is not None:
+            yield event.plain_result(self._render_feedback(rejection))
+            return
+        group_id = self._group_id(event)
+        if group_id not in self._temp_silences:
+            yield event.plain_result(self._render_feedback("feedback_silence_none"))
+            return
+        self._temp_silences.pop(group_id, None)
+        self._save_state()
+        yield event.plain_result(self._render_feedback("feedback_silence_off"))
 
     async def terminate(self) -> None:
         task = self._holiday_refresh_task

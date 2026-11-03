@@ -92,6 +92,12 @@
     "hint": "支持占位符：{next_open}（今天 08:00）、{next_open_time}（08:00）、{next_open_day}（今天）、{window}（08:00-12:00）、{window_end}（12:00）",
     "default": "⏰ 现在是 Bot 的休息时间，暂时不能回复消息。\n下次开放时间：{next_open}\n到时候再来找我吧～"
   },
+  "temp_silence_notice": {
+    "description": "单独静默提醒文案",
+    "type": "text",
+    "hint": "单独静默期间的提醒优先于普通静默提醒。支持 {remaining}（剩余 hh:mm）、{until}（结束时间）、{window}、{window_end}",
+    "default": "本群当前处于单独静默，剩余 {remaining}。"
+  },
   "notice_cooldown_seconds": {
     "description": "提醒冷却（秒）",
     "type": "int",
@@ -118,5 +124,62 @@
       "type": "string"
     },
     "default": []
+  },
+  "feedback_exempt_on": {
+    "description": "启用群豁免后的反馈",
+    "type": "text",
+    "hint": "支持 \\n 换行；默认保持中立",
+    "default": "已为本群开启临时静默豁免。"
+  },
+  "feedback_exempt_off": {
+    "description": "解除群豁免后的反馈",
+    "type": "text",
+    "default": "已解除本群的临时静默豁免。"
+  },
+  "feedback_exempt_none": {
+    "description": "群没有豁免时的反馈",
+    "type": "text",
+    "default": "本群当前没有临时静默豁免。"
+  },
+  "feedback_exempt_blocked": {
+    "description": "单独静默时使用 /豁免 的反馈",
+    "type": "text",
+    "default": "本群当前处于单独静默，无法使用豁免。"
+  },
+  "feedback_silence_on": {
+    "description": "设置单独静默后的反馈",
+    "type": "text",
+    "hint": "支持 {duration}、{until}、{remaining} 占位符",
+    "default": "已为本群设置单独静默，持续 {duration}，至 {until}。"
+  },
+  "feedback_silence_off": {
+    "description": "解除单独静默后的反馈",
+    "type": "text",
+    "default": "已解除本群的单独静默。"
+  },
+  "feedback_silence_none": {
+    "description": "没有单独静默时的反馈",
+    "type": "text",
+    "default": "本群当前没有单独静默。"
+  },
+  "feedback_silence_invalid": {
+    "description": "单独静默时长无效的反馈",
+    "type": "text",
+    "default": "静默时长格式无效，请使用 30m、1h、1h30m 等格式。"
+  },
+  "feedback_silence_usage": {
+    "description": "单独静默缺少参数时的反馈",
+    "type": "text",
+    "default": "用法：/静默 <时长>，例如 /静默 30m。"
+  },
+  "feedback_admin_only": {
+    "description": "非管理员使用管理员指令的反馈",
+    "type": "text",
+    "default": "该指令仅限管理员使用。"
+  },
+  "feedback_group_only": {
+    "description": "非群聊使用群指令的反馈",
+    "type": "text",
+    "default": "该指令仅限群聊使用。"
   }
 }

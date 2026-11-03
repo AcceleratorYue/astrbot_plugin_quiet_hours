@@ -5,7 +5,8 @@
 2. 多方案状态计算（并集、跨天、节假日 skip/run、下次开放/下次静默）；
 3. 两种静默强度：完全关闭 / 保留上下文缓存（白名单插件）；
 4. 唤醒判断、戳一戳目标、提醒冷却、回复拦截与管理员豁免；
-5. AstrBot 加载器校验（metadata、插件类探测、配置 schema）。
+5. 群级临时豁免、单独静默、时长解析、状态持久化和指令反馈；
+6. AstrBot 加载器校验（metadata、插件类探测、配置 schema）。
 
 运行（需要装有 astrbot 的 Python 环境）：
 
@@ -142,6 +143,9 @@ def make_plugin(overrides: dict | None = None):
     plugin._holidays = qh.load_bundled_holidays()
     plugin._holiday_cache_path = None
     plugin._holiday_refresh_task = None
+    plugin._state_path = None
+    plugin._exempt_groups = set()
+    plugin._temp_silences = {}
     return plugin
 
 
@@ -687,6 +691,107 @@ def test_notice_template() -> None:
     print("✅ 提醒模板占位符：", text)
 
 
+def test_duration_parser() -> None:
+    cases = {
+        "30m": 1800,
+        "30分钟": 1800,
+        "1h": 3600,
+        "1.5h": 5400,
+        "1h30m": 5400,
+        "1小时30分": 5400,
+        "90": 5400,
+        "1:30": 5400,
+        "2d": 172800,
+    }
+    for raw, seconds in cases.items():
+        parsed = qh.parse_duration(raw)
+        assert parsed is not None and parsed.total_seconds() == seconds, (raw, parsed)
+    for raw in ("", "0", "-1", "abc", "8d", "1h30"):
+        assert qh.parse_duration(raw) is None, raw
+    assert qh.format_hhmm(59) == "00:01"
+    assert qh.format_hhmm(3600) == "01:00"
+    assert qh.format_hhmm(3661) == "01:02"
+    print("✅ 单独静默时长解析：分钟/小时/复合/冒号/中文单位")
+
+
+def test_temp_control() -> None:
+    async def run() -> None:
+        plugin = make_plugin({"time_windows": ["09:00-12:00"]})
+        event = FakeEvent(admin=True, text="/静默 30m")
+        result = [item async for item in plugin.cmd_temp_silence(event)]
+        assert "单独静默" in result[0][1], result
+
+        state, temp_until = plugin._effective_quiet(event)
+        assert state.active and temp_until is not None
+        notice = plugin._render_notice(state, FIXED_NOW, temp_until)
+        assert "剩余 00:30" in notice, notice
+        assert "下次开放时间" not in notice, notice  # 单独静默提醒优先
+
+        blocked = [item async for item in plugin.cmd_exempt(event)]
+        assert "无法使用豁免" in blocked[0][1], blocked
+
+        cleared = [item async for item in plugin.cmd_clear_temp_silence(event)]
+        assert "已解除" in cleared[0][1], cleared
+        state, temp_until = plugin._effective_quiet(event)
+        assert state.active and temp_until is None  # 定时静默仍然生效
+
+        exempt = [item async for item in plugin.cmd_exempt(event)]
+        assert "豁免" in exempt[0][1], exempt
+        state, _ = plugin._effective_quiet(event)
+        assert not state.active  # 群豁免优先于定时静默
+
+        unexempt = [item async for item in plugin.cmd_unexempt(event)]
+        assert "解除" in unexempt[0][1], unexempt
+        state, _ = plugin._effective_quiet(event)
+        assert state.active  # 解除豁免后回到定时静默
+
+        # 单独静默过期后回到定时静默
+        plugin._temp_silences["123456"] = (FIXED_NOW - timedelta(seconds=1)).timestamp()
+        state, temp_until = plugin._effective_quiet(event)
+        assert state.active and temp_until is None
+        assert "123456" not in plugin._temp_silences
+
+        # 非管理员 / 私聊拒绝
+        denied = [item async for item in plugin.cmd_exempt(FakeEvent(admin=False))]
+        assert "管理员" in denied[0][1], denied
+        private = [item async for item in plugin.cmd_exempt(FakeEvent(admin=True, private=True, group=None))]
+        assert "群聊" in private[0][1], private
+
+        # 自定义反馈模板生效
+        custom = make_plugin(
+            {
+                "time_windows": ["09:00-12:00"],
+                "feedback_exempt_on": "CUSTOM-EXEMPT",
+            }
+        )
+        custom_event = FakeEvent(admin=True)
+        custom_result = [item async for item in custom.cmd_exempt(custom_event)]
+        assert custom_result[0][1] == "CUSTOM-EXEMPT", custom_result
+
+    asyncio.run(run())
+    print("✅ 临时控制：单独静默优先 / 豁免互斥 / 定时静默回退 / 权限与模板")
+
+
+def test_state_persistence() -> None:
+    import tempfile
+    import time
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "quiet_hours_state.json"
+        plugin = make_plugin()
+        plugin._state_path = path
+        plugin._exempt_groups = {"111111", "222222"}
+        plugin._temp_silences = {"333333": time.time() + 600}
+        plugin._save_state()
+
+        restored = make_plugin()
+        restored._state_path = path
+        restored._load_state()
+        assert restored._exempt_groups == {"111111", "222222"}
+        assert "333333" in restored._temp_silences
+    print("✅ 状态持久化：群豁免与单独静默写入/恢复")
+
+
 # ---------------------------------------------------------------------------
 # 5. AstrBot 加载器校验
 # ---------------------------------------------------------------------------
@@ -700,14 +805,22 @@ def test_loader() -> None:
     assert metadata is not None
     assert metadata.name == "astrbot_plugin_quiet_hours", metadata.name
     assert metadata.display_name == "静默时段", metadata.display_name
-    assert metadata.version == "1.1.2", metadata.version
+    assert metadata.version == "1.2.0", metadata.version
 
     classes = PluginManager._get_classes(sys.modules[qh.__name__])
     assert classes == ["QuietHoursPlugin"], classes
 
     schema = PluginManager._load_plugin_config_schema(str(PLUGIN_DIR / "_conf_schema.json"))
     assert isinstance(schema, dict)
-    for key in ("schemes", "holiday_enabled", "holiday_auto_update", "block_mode"):
+    for key in (
+        "schemes",
+        "holiday_enabled",
+        "holiday_auto_update",
+        "block_mode",
+        "temp_silence_notice",
+        "feedback_exempt_on",
+        "feedback_silence_on",
+    ):
         assert key in schema, key
     assert schema["block_mode"]["default"] == "full"
     assert schema["context_plugins"]["default"] == []
@@ -751,6 +864,9 @@ def main() -> int:
         test_guard_llm_and_result()
         asyncio.run(test_commands())
         test_notice_template()
+        test_duration_parser()
+        test_temp_control()
+        test_state_persistence()
         test_loader()
     except AssertionError:
         traceback.print_exc()
