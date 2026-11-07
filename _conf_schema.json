@@ -8,7 +8,7 @@
   "schemes": {
     "description": "静默方案",
     "type": "template_list",
-    "hint": "像闹钟一样管理多个方案；为空时回退到下方旧版单方案配置。",
+    "hint": "像闹钟一样管理多个方案。",
     "default": [],
     "templates": {
       "scheme": {
