@@ -895,7 +895,7 @@ def test_loader() -> None:
     assert metadata is not None
     assert metadata.name == "astrbot_plugin_quiet_hours", metadata.name
     assert metadata.display_name == "静默时段", metadata.display_name
-    assert metadata.version == "1.2.0", metadata.version
+    assert metadata.version == "1.3.0", metadata.version
 
     classes = PluginManager._get_classes(sys.modules[qh.__name__])
     assert classes == ["QuietHoursPlugin"], classes
@@ -914,6 +914,9 @@ def test_loader() -> None:
         assert key in schema, key
     assert schema["block_mode"]["default"] == "full"
     assert schema["context_plugins"]["default"] == []
+    assert schema["schemes"]["type"] == "template_list"
+    assert schema["schemes"]["templates"]["scheme"]["display_item"] == "name"
+    assert schema["schemes"]["templates"]["scheme"]["items"]["windows"]["type"] == "list"
 
     runtime = PLUGIN_DIR / "_test_runtime"
     runtime.mkdir(exist_ok=True)
@@ -925,15 +928,25 @@ def test_loader() -> None:
         assert config.get("block_mode") == "full"
         assert config.get("context_plugins") == []
         assert config.get("holiday_enabled") is True
-        assert config.get("schemes") == ""
+        assert config.get("schemes") == []
         plugin = qh.QuietHoursPlugin(_StubContext(), config)
         assert plugin._quiet_now().active is False
+
+        config["schemes"] = (
+            '[{"name":"工作日高峰","weekdays":"1,2,3,4,5",'
+            '"windows":["09:00-12:00"],"holidays":"skip"}]'
+        )
+        migrated = qh.QuietHoursPlugin(_StubContext(), config)
+        assert isinstance(config.get("schemes"), list)
+        assert config["schemes"][0]["__template_key"] == "scheme"
+        assert config["schemes"][0]["enabled"] is True
+        assert migrated._config_snapshot()[2][0].name == "工作日高峰"
     finally:
         import shutil
 
         shutil.rmtree(runtime, ignore_errors=True)
 
-    print("✅ 加载器校验：metadata / 插件类 / 配置 schema / 默认值")
+    print("✅ 加载器校验：metadata / 插件类 / 配置 schema / 默认值 / 旧 schemes 迁移")
 
 
 def main() -> int:

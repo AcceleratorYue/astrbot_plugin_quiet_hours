@@ -1,12 +1,12 @@
 name: astrbot_plugin_quiet_hours
 display_name: 静默时段
-short_desc: 固定时段暂停非管理员回复，支持群级临时豁免与单独静默
+short_desc: 固定时段暂停非管理员回复，支持 WebUI 方案卡片、群级豁免与单独静默
 desc: >-
   按固定的每日时间段暂停 Bot 的非管理员回复：静默期内管理员照常使用，
   其他用户尝试触发时会收到一条可编辑的提醒（含下一次开放时间）。
-  支持管理员按群临时豁免、一次性单独静默和单独的剩余时间提醒。
+  支持 WebUI 可视化管理多个静默方案、管理员按群临时豁免、一次性单独静默。
   拦截发生在消息入口、LLM 请求和发送前三层，不会消耗模型 token。
-version: 1.2.0
+version: 1.3.0
 author: AcceleratorYue
 repo: https://github.com/AcceleratorYue/astrbot_plugin_quiet_hours
 social_link: https://github.com/AcceleratorYue

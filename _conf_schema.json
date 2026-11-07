@@ -6,10 +6,54 @@
     "default": true
   },
   "schemes": {
-    "description": "静默方案（JSON 数组）",
-    "type": "text",
-    "hint": "可配置多个方案，像闹钟一样：每个方案包含 name（名称）、windows（时间段数组）、weekdays（重复星期，留空=每天）、holidays（skip=法定节假日跳过 / run=法定节假日也启用）、enabled（是否启用）。留空则退回旧版 time_windows + active_weekdays 单方案。示例：[{\"name\":\"工作日高峰\",\"weekdays\":\"1,2,3,4,5\",\"windows\":[\"09:00-12:00\",\"14:00-18:00\"],\"holidays\":\"skip\"},{\"name\":\"夜间宵禁\",\"weekdays\":\"\",\"windows\":[\"23:00-07:00\"],\"holidays\":\"run\"}]",
-    "default": ""
+    "description": "静默方案",
+    "type": "template_list",
+    "hint": "像闹钟一样管理多个方案；为空时回退到下方旧版单方案配置。",
+    "default": [],
+    "templates": {
+      "scheme": {
+        "name": "静默方案",
+        "display_item": "name",
+        "hide_hint_in_list": true,
+        "items": {
+          "name": {
+            "description": "方案名称",
+            "type": "string",
+            "default": ""
+          },
+          "enabled": {
+            "description": "启用",
+            "type": "bool",
+            "default": true
+          },
+          "weekdays": {
+            "description": "重复星期",
+            "type": "string",
+            "default": "",
+            "hint": "ISO 星期：1=周一 … 7=周日，用逗号分隔；留空=每天"
+          },
+          "windows": {
+            "description": "静默时间段",
+            "type": "list",
+            "items": {
+              "type": "string"
+            },
+            "default": [],
+            "hint": "格式 HH:MM-HH:MM，可填多个；跨天如 23:00-08:00；00:00-00:00 表示全天"
+          },
+          "holidays": {
+            "description": "法定节假日",
+            "type": "string",
+            "options": [
+              "skip",
+              "run"
+            ],
+            "default": "skip",
+            "hint": "skip=法定节假日跳过；run=法定节假日也启用"
+          }
+        }
+      }
+    }
   },
   "time_windows": {
     "description": "静默时段（旧版单方案）",

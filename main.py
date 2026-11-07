@@ -54,7 +54,7 @@ except Exception:  # pragma: no cover
         pass
 
 
-PLUGIN_VERSION = "1.2.0"
+PLUGIN_VERSION = "1.3.0"
 LOG_PREFIX = "[静默时段]"
 
 STATUS_COMMANDS = ("静默状态", "免打扰状态", "静默查询")
@@ -96,8 +96,8 @@ DEFAULT_FEEDBACK = {
 
 DEFAULT_OPTIONS: dict[str, Any] = {
     "enabled": True,
-    # 多方案配置（JSON 数组）；为空时回退到旧版 time_windows/active_weekdays
-    "schemes": "",
+    # 多方案配置（template_list）；为空时回退到旧版 time_windows/active_weekdays
+    "schemes": [],
     "time_windows": [],
     "active_weekdays": "1,2,3,4,5,6,7",
     "holiday_enabled": True,
@@ -549,7 +549,7 @@ def _parse_scheme_item(item: Any, index: int) -> QuietScheme | None:
 def parse_schemes(
     raw: Any, legacy_windows: Any = None, legacy_days: Any = None
 ) -> list[QuietScheme]:
-    """解析 schemes（JSON 数组）；为空时把旧版单方案配置迁移成一个方案。"""
+    """解析 schemes（template_list 列表，兼容旧 JSON 字符串）。"""
 
     items: list[Any] = []
     if isinstance(raw, str) and raw.strip():
@@ -777,6 +777,7 @@ class QuietHoursPlugin(Star):
     def __init__(self, context: Context, config: Any = None) -> None:
         super().__init__(context)
         self._config = config
+        self._migrate_schemes_config()
         self._notified: dict[str, float] = {}
         self._notified_group: dict[str, float] = {}
         self._snapshot_key: tuple | None = None
@@ -973,6 +974,92 @@ class QuietHoursPlugin(Star):
         if isinstance(value, (list, tuple, set)):
             return [str(item) for item in value if str(item).strip()]
         return []
+
+    def _migrate_schemes_config(self) -> None:
+        """把旧版 schemes JSON 字符串迁移为 WebUI template_list 的列表。"""
+
+        config = self._config
+        if not isinstance(config, dict):
+            return
+        try:
+            raw = config.get("schemes")
+        except Exception:
+            return
+
+        items: list[Any] | None = None
+        if isinstance(raw, str):
+            if not raw.strip():
+                return
+            try:
+                parsed = json.loads(raw)
+            except Exception as exc:
+                logger.warning(f"{LOG_PREFIX} 旧 schemes JSON 无法迁移：{exc}")
+                return
+            if isinstance(parsed, dict):
+                parsed = parsed.get("schemes") or [parsed]
+            if isinstance(parsed, list):
+                items = parsed
+            else:
+                logger.warning(f"{LOG_PREFIX} 旧 schemes 不是数组，跳过迁移")
+                return
+        elif isinstance(raw, list):
+            items = raw
+        else:
+            return
+
+        normalized: list[dict[str, Any]] = []
+        for index, item in enumerate(items, start=1):
+            if not isinstance(item, dict):
+                logger.warning(
+                    f"{LOG_PREFIX} 忽略第 {index} 个静默方案：不是 JSON 对象"
+                )
+                continue
+            data = dict(item)
+            data.pop("__template_key", None)
+            data.setdefault("name", f"方案{index}")
+            data["enabled"] = _as_bool(data.get("enabled"), True)
+
+            windows = data.get(
+                "windows", data.get("time_windows", data.get("periods", []))
+            )
+            if isinstance(windows, str):
+                windows = [
+                    part.strip()
+                    for part in _WINDOW_SPLIT_RE.split(windows)
+                    if part.strip()
+                ]
+            elif isinstance(windows, (list, tuple, set)):
+                windows = [str(part).strip() for part in windows if str(part).strip()]
+            else:
+                windows = []
+            data["windows"] = windows
+
+            weekdays = data.get("weekdays", data.get("active_weekdays", ""))
+            if isinstance(weekdays, (list, tuple, set)):
+                weekdays = ",".join(str(day) for day in weekdays)
+            data["weekdays"] = str(weekdays or "").strip()
+
+            holiday_mode = str(
+                data.get("holidays", data.get("holiday", "skip"))
+            ).strip().lower()
+            data["holidays"] = (
+                "run"
+                if holiday_mode
+                in {"run", "on", "true", "1", "启用", "开启", "是", "也启用"}
+                else "skip"
+            )
+            normalized.append({"__template_key": "scheme", **data})
+
+        if normalized == items:
+            return
+        try:
+            config["schemes"] = normalized
+            save_config = getattr(config, "save_config", None)
+            if callable(save_config):
+                save_config()
+            logger.info(f"{LOG_PREFIX} 已将旧 schemes 配置迁移为 template_list")
+        except Exception as exc:
+            logger.warning(f"{LOG_PREFIX} 保存 schemes 迁移结果失败：{exc}")
 
     # -- 时间与状态 ------------------------------------------------------
 
