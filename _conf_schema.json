@@ -55,21 +55,6 @@
       }
     }
   },
-  "time_windows": {
-    "description": "静默时段（旧版单方案）",
-    "type": "list",
-    "hint": "仅在 schemes 为空时生效。格式 HH:MM-HH:MM，可填多个；跨天如 23:00-08:00；00:00-00:00 表示全天",
-    "items": {
-      "type": "string"
-    },
-    "default": []
-  },
-  "active_weekdays": {
-    "description": "生效星期（旧版单方案）",
-    "type": "string",
-    "hint": "仅在 schemes 为空时生效。ISO 星期：1=周一 … 7=周日，用逗号分隔（如 1,2,3,4,5）；留空 = 每天",
-    "default": "1,2,3,4,5,6,7"
-  },
   "holiday_enabled": {
     "description": "启用法定节假日识别",
     "type": "bool",

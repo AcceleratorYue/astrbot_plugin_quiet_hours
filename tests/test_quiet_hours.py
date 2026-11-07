@@ -1,7 +1,7 @@
 """静默时段插件自测脚本（开发用，不参与插件运行）。
 
 覆盖：
-1. 时间段解析、静默方案解析（多方案 + 旧版兼容）、法定节假日数据；
+1. 时间段解析、静默方案解析（template_list + 旧 JSON 迁移）、法定节假日数据；
 2. 多方案状态计算（并集、跨天、节假日 skip/run、下次开放/下次静默）；
 3. 两种静默强度：完全关闭 / 保留上下文缓存（白名单插件）；
 4. 唤醒判断、戳一戳目标、提醒冷却、回复拦截与管理员豁免；
@@ -134,12 +134,27 @@ class FakeEvent:
 
 def make_plugin(overrides: dict | None = None):
     plugin = object.__new__(qh.QuietHoursPlugin)
+    overrides = dict(overrides or {})
+    # 测试仍用旧版 fixture 传时段；转换成当前 template_list 方案
+    legacy_windows = overrides.pop("time_windows", None)
+    legacy_days = overrides.pop("active_weekdays", None)
+    if legacy_windows is not None and "schemes" not in overrides:
+        overrides["schemes"] = [
+            {
+                "__template_key": "scheme",
+                "name": "测试方案",
+                "enabled": True,
+                "weekdays": legacy_days or "",
+                "windows": list(legacy_windows or []),
+                "holidays": "skip",
+            }
+        ]
     # 测试默认关闭群级冷却，避免影响单用户提醒相关断言；群级冷却单独测试
     defaults = {
         **qh.DEFAULT_OPTIONS,
         "notice_group_cooldown_seconds": 0,
     }
-    plugin._config = {**defaults, **(overrides or {})}
+    plugin._config = {**defaults, **overrides}
     plugin._notified = {}
     plugin._notified_group = {}
     plugin._snapshot_key = None
@@ -241,23 +256,16 @@ def test_parse_schemes() -> None:
     assert schemes[1].holidays == "run"
     assert schemes[0].window_text() == "09:00-12:00、14:00-18:00"
 
-    # 旧版单方案兼容
-    legacy = qh.parse_schemes("", ["08:00-12:00"], "1,2,3")
-    assert len(legacy) == 1
-    assert legacy[0].name == "默认方案"
-    assert legacy[0].weekdays == frozenset({1, 2, 3})
-    assert legacy[0].holidays == "skip"
-
-    # 非法 JSON：回退旧版
-    bad = qh.parse_schemes("{not-json", ["08:00-12:00"], "")
-    assert len(bad) == 1 and bad[0].name == "默认方案"
+    # 空方案与非法 JSON：不再回退旧版单方案
+    assert qh.parse_schemes("") == []
+    assert qh.parse_schemes("{not-json") == []
 
     # 方案里的 enabled=false 也允许保留（只是不生效）
     disabled = qh.parse_schemes(
         json.dumps([{"name": "停用", "windows": ["01:00-02:00"], "enabled": False}])
     )
     assert disabled[0].enabled is False
-    print("✅ 方案解析：多方案 / 旧版兼容 / 非法 JSON 回退")
+    print("✅ 方案解析：多方案 / template_list / 空方案 / 非法 JSON")
 
 
 def test_holiday_data() -> None:
@@ -662,7 +670,7 @@ async def test_commands() -> None:
     text = results[0][1]
     assert "静默" in text and "下次开放" in text and "今天 12:00" in text, text
     assert "静默强度" in text and "保留上下文/缓存" in text, text
-    assert "方案「默认方案」" in text, text
+    assert "方案「测试方案」" in text, text
     assert "保留插件：无" in text, text
     assert "法定节假日识别：开" in text, text
 
@@ -895,7 +903,7 @@ def test_loader() -> None:
     assert metadata is not None
     assert metadata.name == "astrbot_plugin_quiet_hours", metadata.name
     assert metadata.display_name == "静默时段", metadata.display_name
-    assert metadata.version == "1.3.0", metadata.version
+    assert metadata.version == "1.3.1", metadata.version
 
     classes = PluginManager._get_classes(sys.modules[qh.__name__])
     assert classes == ["QuietHoursPlugin"], classes

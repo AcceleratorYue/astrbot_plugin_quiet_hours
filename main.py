@@ -54,7 +54,7 @@ except Exception:  # pragma: no cover
         pass
 
 
-PLUGIN_VERSION = "1.3.0"
+PLUGIN_VERSION = "1.3.1"
 LOG_PREFIX = "[静默时段]"
 
 STATUS_COMMANDS = ("静默状态", "免打扰状态", "静默查询")
@@ -96,10 +96,8 @@ DEFAULT_FEEDBACK = {
 
 DEFAULT_OPTIONS: dict[str, Any] = {
     "enabled": True,
-    # 多方案配置（template_list）；为空时回退到旧版 time_windows/active_weekdays
+    # 多方案配置（template_list）
     "schemes": [],
-    "time_windows": [],
-    "active_weekdays": "1,2,3,4,5,6,7",
     "holiday_enabled": True,
     "holiday_auto_update": True,
     "holiday_update_url": "",
@@ -523,10 +521,8 @@ def _parse_scheme_item(item: Any, index: int) -> QuietScheme | None:
         logger.warning(f"{LOG_PREFIX} 忽略第 {index} 个静默方案：不是 JSON 对象")
         return None
     name = str(item.get("name") or f"方案{index}").strip() or f"方案{index}"
-    windows = parse_windows(
-        item.get("windows") or item.get("time_windows") or item.get("periods") or []
-    )
-    weekdays = parse_weekdays(item.get("weekdays", item.get("active_weekdays", "")))
+    windows = parse_windows(item.get("windows") or [])
+    weekdays = parse_weekdays(item.get("weekdays", ""))
     holiday_mode = str(item.get("holidays", item.get("holiday", "skip"))).strip().lower()
     if holiday_mode in {"run", "on", "true", "1", "启用", "开启", "是"}:
         holiday_mode = "run"
@@ -546,10 +542,8 @@ def _parse_scheme_item(item: Any, index: int) -> QuietScheme | None:
     )
 
 
-def parse_schemes(
-    raw: Any, legacy_windows: Any = None, legacy_days: Any = None
-) -> list[QuietScheme]:
-    """解析 schemes（template_list 列表，兼容旧 JSON 字符串）。"""
+def parse_schemes(raw: Any) -> list[QuietScheme]:
+    """解析 schemes（template_list 列表，兼容旧 JSON 字符串迁移）。"""
 
     items: list[Any] = []
     if isinstance(raw, str) and raw.strip():
@@ -572,22 +566,7 @@ def parse_schemes(
         scheme = _parse_scheme_item(item, index)
         if scheme is not None:
             schemes.append(scheme)
-    if schemes:
-        return schemes
-
-    # 旧版单方案兼容：time_windows + active_weekdays
-    windows = parse_windows(legacy_windows or [])
-    if windows:
-        return [
-            QuietScheme(
-                name="默认方案",
-                enabled=True,
-                weekdays=frozenset(parse_weekdays(legacy_days or "")),
-                windows=tuple(windows),
-                holidays="skip",
-            )
-        ]
-    return []
+    return schemes
 
 
 def _holiday_entries(payload: Any) -> list[tuple[date, str, bool]]:
@@ -981,6 +960,8 @@ class QuietHoursPlugin(Star):
         config = self._config
         if not isinstance(config, dict):
             return
+        legacy_keys = ("time_windows", "active_weekdays")
+        legacy_present = any(key in config for key in legacy_keys)
         try:
             raw = config.get("schemes")
         except Exception:
@@ -989,26 +970,27 @@ class QuietHoursPlugin(Star):
         items: list[Any] | None = None
         if isinstance(raw, str):
             if not raw.strip():
-                return
-            try:
-                parsed = json.loads(raw)
-            except Exception as exc:
-                logger.warning(f"{LOG_PREFIX} 旧 schemes JSON 无法迁移：{exc}")
-                return
-            if isinstance(parsed, dict):
-                parsed = parsed.get("schemes") or [parsed]
-            if isinstance(parsed, list):
-                items = parsed
+                items = []
             else:
-                logger.warning(f"{LOG_PREFIX} 旧 schemes 不是数组，跳过迁移")
-                return
+                try:
+                    parsed = json.loads(raw)
+                except Exception as exc:
+                    logger.warning(f"{LOG_PREFIX} 旧 schemes JSON 无法迁移：{exc}")
+                    return
+                if isinstance(parsed, dict):
+                    parsed = parsed.get("schemes") or [parsed]
+                if isinstance(parsed, list):
+                    items = parsed
+                else:
+                    logger.warning(f"{LOG_PREFIX} 旧 schemes 不是数组，跳过迁移")
+                    return
         elif isinstance(raw, list):
             items = raw
-        else:
+        elif not legacy_present:
             return
 
         normalized: list[dict[str, Any]] = []
-        for index, item in enumerate(items, start=1):
+        for index, item in enumerate(items or [], start=1):
             if not isinstance(item, dict):
                 logger.warning(
                     f"{LOG_PREFIX} 忽略第 {index} 个静默方案：不是 JSON 对象"
@@ -1019,9 +1001,7 @@ class QuietHoursPlugin(Star):
             data.setdefault("name", f"方案{index}")
             data["enabled"] = _as_bool(data.get("enabled"), True)
 
-            windows = data.get(
-                "windows", data.get("time_windows", data.get("periods", []))
-            )
+            windows = data.get("windows", [])
             if isinstance(windows, str):
                 windows = [
                     part.strip()
@@ -1034,14 +1014,12 @@ class QuietHoursPlugin(Star):
                 windows = []
             data["windows"] = windows
 
-            weekdays = data.get("weekdays", data.get("active_weekdays", ""))
+            weekdays = data.get("weekdays", "")
             if isinstance(weekdays, (list, tuple, set)):
                 weekdays = ",".join(str(day) for day in weekdays)
             data["weekdays"] = str(weekdays or "").strip()
 
-            holiday_mode = str(
-                data.get("holidays", data.get("holiday", "skip"))
-            ).strip().lower()
+            holiday_mode = str(data.get("holidays", "skip")).strip().lower()
             data["holidays"] = (
                 "run"
                 if holiday_mode
@@ -1050,10 +1028,12 @@ class QuietHoursPlugin(Star):
             )
             normalized.append({"__template_key": "scheme", **data})
 
-        if normalized == items:
+        if normalized == items and not legacy_present:
             return
         try:
             config["schemes"] = normalized
+            for key in legacy_keys:
+                config.pop(key, None)
             save_config = getattr(config, "save_config", None)
             if callable(save_config):
                 save_config()
@@ -1088,8 +1068,6 @@ class QuietHoursPlugin(Star):
         """解析并缓存静默方案；配置变化后自动重新解析（避免每条消息重复解析）。"""
 
         raw_schemes = self._opt("schemes")
-        raw_windows = self._opt("time_windows")
-        raw_days = self._opt("active_weekdays")
         raw_scope = self._opt("scope")
         raw_context = self._opt("context_plugins")
         enabled = self._bool_opt("enabled")
@@ -1099,8 +1077,6 @@ class QuietHoursPlugin(Star):
         key = (
             enabled,
             repr(raw_schemes),
-            repr(raw_windows),
-            repr(raw_days),
             repr(raw_scope),
             mode,
             repr(raw_context),
@@ -1108,7 +1084,7 @@ class QuietHoursPlugin(Star):
         if key == self._snapshot_key and self._snapshot_value is not None:
             return self._snapshot_value
 
-        schemes = parse_schemes(raw_schemes, raw_windows, raw_days)
+        schemes = parse_schemes(raw_schemes)
         scope = str(raw_scope or "all").strip().lower()
         context_plugins = tuple(self._list_opt("context_plugins"))
         value = (enabled, mode, schemes, scope, context_plugins)
@@ -1631,8 +1607,7 @@ class QuietHoursPlugin(Star):
             return
         if not any(scheme.enabled for scheme in schemes):
             yield event.plain_result(
-                "静默时段：未配置静默方案。请在 WebUI 插件配置里填写 schemes（JSON 数组），"
-                "或使用旧版 time_windows/active_weekdays。"
+                "静默时段：未配置静默方案。请在 WebUI 插件配置的「静默方案」卡片里添加方案。"
             )
             return
 
