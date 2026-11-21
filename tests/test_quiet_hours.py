@@ -379,6 +379,81 @@ def test_scheme_state() -> None:
     print("✅ 多方案状态：并集 / 跨天 / 节假日 skip 与 run / 关闭节假日识别")
 
 
+def test_scheme_whitelist_overlay() -> None:
+    # 白名单解析：列表、逗号/空白字符串、完整 UMO 都保留。
+    parsed = qh.parse_schemes(
+        [
+            {
+                "name": "全局",
+                "windows": ["08:00-20:00"],
+            },
+            {
+                "name": "会话专属",
+                "windows": ["00:00-06:00"],
+                "whitelist": ["123456", "aiocqhttp:FriendMessage:10001"],
+            },
+        ]
+    )
+    assert parsed[0].whitelist == frozenset()
+    assert parsed[1].whitelist == frozenset(
+        ["123456", "aiocqhttp:FriendMessage:10001"]
+    )
+    assert qh.parse_whitelist("123456, 10001\n20002") == frozenset(
+        ["123456", "10001", "20002"]
+    )
+
+    global_scheme = {"name": "全局", "windows": ["08:00-20:00"]}
+    session_scheme = {
+        "name": "会话专属",
+        "windows": ["00:00-06:00"],
+        "whitelist": ["123456"],
+    }
+    plugin = make_plugin({"schemes": [global_scheme, session_scheme], "scope": "all"})
+    night = datetime(2026, 10, 21, 3, 0, tzinfo=TZ)
+    plugin._now = lambda: night
+
+    target_event = FakeEvent(group="123456", umo="aiocqhttp:GroupMessage:123456")
+    other_group = FakeEvent(group="999999", umo="aiocqhttp:GroupMessage:999999")
+    target_state = plugin._quiet_now(target_event)
+    assert target_state.active
+    assert target_state.interval is not None
+    assert target_state.interval[1] == datetime(2026, 10, 21, 6, 0, tzinfo=TZ)
+    assert not plugin._quiet_now(other_group).active
+
+    plugin._now = lambda: FIXED_NOW
+    assert plugin._quiet_now(target_event).active
+    assert plugin._quiet_now(other_group).active
+    assert [s.name for s in qh.schemes_for_event(plugin._config_snapshot()[2], target_event, "all")] == [
+        "全局",
+        "会话专属",
+    ]
+
+    # 白名单可以突破全局 groups 范围，只对私聊会话生效。
+    private_scheme = {
+        "name": "私聊专属",
+        "windows": ["00:00-06:00"],
+        "whitelist": ["10001"],
+    }
+    groups_plugin = make_plugin({"schemes": [private_scheme], "scope": "groups"})
+    private_event = FakeEvent(
+        group=None,
+        private=True,
+        sender="10001",
+        umo="aiocqhttp:FriendMessage:10001",
+    )
+    groups_plugin._now = lambda: night
+    assert groups_plugin._in_scope(private_event)
+    assert groups_plugin._quiet_now(private_event).active
+
+    # 白名单为空时仍然严格跟随全局范围。
+    empty_whitelist_private = make_plugin(
+        {"schemes": [{"name": "全局", "windows": ["00:00-06:00"]}], "scope": "groups"}
+    )
+    assert not empty_whitelist_private._in_scope(private_event)
+
+    print("✅ 方案白名单：空跟随全局 / 群号 / 私聊 QQ / 完整 UMO / 会话叠加")
+
+
 def test_format_helpers() -> None:
     today = date(2026, 10, 20)
     assert qh.format_day_label(today, today) == "今天"
@@ -903,7 +978,7 @@ def test_loader() -> None:
     assert metadata is not None
     assert metadata.name == "astrbot_plugin_quiet_hours", metadata.name
     assert metadata.display_name == "静默时段", metadata.display_name
-    assert metadata.version == "1.3.1", metadata.version
+    assert metadata.version == "1.4.0", metadata.version
 
     classes = PluginManager._get_classes(sys.modules[qh.__name__])
     assert classes == ["QuietHoursPlugin"], classes
@@ -925,6 +1000,7 @@ def test_loader() -> None:
     assert schema["schemes"]["type"] == "template_list"
     assert schema["schemes"]["templates"]["scheme"]["display_item"] == "name"
     assert schema["schemes"]["templates"]["scheme"]["items"]["windows"]["type"] == "list"
+    assert schema["schemes"]["templates"]["scheme"]["items"]["whitelist"]["type"] == "list"
 
     runtime = PLUGIN_DIR / "_test_runtime"
     runtime.mkdir(exist_ok=True)
@@ -966,6 +1042,7 @@ def main() -> int:
         test_holiday_payload_formats()
         test_module_root()
         test_scheme_state()
+        test_scheme_whitelist_overlay()
         test_format_helpers()
         test_wake_detection()
         test_block_modes()

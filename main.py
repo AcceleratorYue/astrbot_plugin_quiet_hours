@@ -11,7 +11,7 @@
 3. 发送前：兜底清空其他插件生成的回复内容（针对不经过 LLM 的直接回复插件）。
 
 作者：AcceleratorYue
-版本：1.2.0
+版本：1.4.0
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ except Exception:  # pragma: no cover
         pass
 
 
-PLUGIN_VERSION = "1.3.1"
+PLUGIN_VERSION = "1.4.0"
 LOG_PREFIX = "[静默时段]"
 
 STATUS_COMMANDS = ("静默状态", "免打扰状态", "静默查询")
@@ -472,13 +472,14 @@ def format_duration(seconds: float) -> str:
 
 @dataclass(frozen=True)
 class QuietScheme:
-    """一个静默方案：静默时间段 + 每周重复 + 法定节假日行为。"""
+    """一个静默方案：静默时间段 + 每周重复 + 法定节假日行为 + 会话白名单。"""
 
     name: str
     enabled: bool
     weekdays: frozenset[int]  # 空集合 / 1-7 = 每天
     windows: tuple[QuietWindow, ...]
     holidays: str  # skip = 法定节假日跳过；run = 法定节假日也启用
+    whitelist: frozenset[str] = frozenset()
 
     def applies_on(
         self,
@@ -505,6 +506,11 @@ class QuietScheme:
     def holiday_text(self) -> str:
         return "法定节假日也启用" if self.holidays == "run" else "法定节假日跳过"
 
+    def whitelist_text(self, scope_text: str = "全局范围") -> str:
+        if not self.whitelist:
+            return f"跟随全局范围（{scope_text}）"
+        return "白名单：" + "、".join(sorted(self.whitelist))
+
 
 def _as_bool(value: Any, default: bool = True) -> bool:
     if isinstance(value, bool):
@@ -514,6 +520,28 @@ def _as_bool(value: Any, default: bool = True) -> bool:
     if value is None:
         return default
     return bool(value)
+
+
+_WHITELIST_SPLIT_RE = re.compile(r"[\s,，;；]+")
+
+
+def parse_whitelist(raw: Any) -> frozenset[str]:
+    """解析方案白名单：支持列表或逗号/空白分隔字符串。"""
+
+    if raw is None:
+        return frozenset()
+    if isinstance(raw, str):
+        items = _WHITELIST_SPLIT_RE.split(raw)
+    elif isinstance(raw, (list, tuple, set)):
+        items = []
+        for item in raw:
+            if isinstance(item, str):
+                items.extend(_WHITELIST_SPLIT_RE.split(item))
+            elif item is not None:
+                items.append(str(item))
+    else:
+        items = [str(raw)]
+    return frozenset(item.strip() for item in items if item and item.strip())
 
 
 def _parse_scheme_item(item: Any, index: int) -> QuietScheme | None:
@@ -539,6 +567,7 @@ def _parse_scheme_item(item: Any, index: int) -> QuietScheme | None:
         weekdays=frozenset(weekdays),
         windows=tuple(windows),
         holidays=holiday_mode,
+        whitelist=parse_whitelist(item.get("whitelist")),
     )
 
 
@@ -569,6 +598,78 @@ def parse_schemes(raw: Any) -> list[QuietScheme]:
     return schemes
 
 
+def event_session_targets(event: AstrMessageEvent | None) -> set[str]:
+    """返回当前事件可匹配的会话标识：完整 UMO、群号或私聊 QQ 号。"""
+
+    if event is None:
+        return set()
+    targets: set[str] = set()
+
+    def add(value: Any) -> None:
+        text = str(value or "").strip()
+        if text:
+            targets.add(text)
+
+    try:
+        add(getattr(event, "unified_msg_origin", ""))
+    except Exception:
+        pass
+    try:
+        add(getattr(event, "session_id", ""))
+    except Exception:
+        pass
+    try:
+        group_id = str(event.get_group_id() or "").strip()
+    except Exception:
+        group_id = ""
+    if group_id:
+        # 群会话只匹配群号/群 UMO，不能拿群成员的 QQ 号误匹配。
+        add(group_id)
+    else:
+        try:
+            add(event.get_sender_id())
+        except Exception:
+            pass
+    return targets
+
+
+def scope_matches_event(event: AstrMessageEvent | None, scope: str) -> bool:
+    if event is None:
+        return True
+    scope = str(scope or "all").strip().lower()
+    if scope == "groups":
+        try:
+            return bool(event.get_group_id())
+        except Exception:
+            return False
+    if scope == "private":
+        try:
+            return bool(event.is_private_chat())
+        except Exception:
+            return False
+    return True
+
+
+def scheme_matches_event(
+    scheme: QuietScheme,
+    event: AstrMessageEvent | None,
+    scope: str,
+) -> bool:
+    """方案对该事件是否适用：有白名单时只按白名单，否则跟随全局范围。"""
+
+    if not scheme.enabled:
+        return False
+    if scheme.whitelist:
+        return bool(event_session_targets(event) & set(scheme.whitelist))
+    return scope_matches_event(event, scope)
+
+
+def schemes_for_event(
+    schemes: list[QuietScheme],
+    event: AstrMessageEvent | None,
+    scope: str,
+) -> list[QuietScheme]:
+    return [scheme for scheme in schemes if scheme_matches_event(scheme, event, scope)]
 def _holiday_entries(payload: Any) -> list[tuple[date, str, bool]]:
     """解析节假日数据，兼容 holiday-cn、timor.tech 与精简数组格式。"""
 
@@ -1019,6 +1120,10 @@ class QuietHoursPlugin(Star):
                 weekdays = ",".join(str(day) for day in weekdays)
             data["weekdays"] = str(weekdays or "").strip()
 
+            data["whitelist"] = sorted(
+                parse_whitelist(data.get("whitelist", []))
+            )
+
             holiday_mode = str(data.get("holidays", "skip")).strip().lower()
             data["holidays"] = (
                 "run"
@@ -1092,14 +1197,17 @@ class QuietHoursPlugin(Star):
         self._snapshot_value = value
         return value
 
-    def _quiet_now(self) -> QuietState:
-        enabled, _mode, schemes, _scope, _context = self._config_snapshot()
+    def _quiet_now(self, event: AstrMessageEvent | None = None) -> QuietState:
+        enabled, _mode, schemes, scope, _context = self._config_snapshot()
         holidays_enabled = self._bool_opt("holiday_enabled")
         if not enabled or not any(scheme.enabled for scheme in schemes):
             return QuietState()
+        applicable = schemes_for_event(schemes, event, scope)
+        if not applicable:
+            return QuietState()
         return query_scheme_state(
             self._now(),
-            schemes,
+            applicable,
             self._holidays,
             holidays_enabled,
         )
@@ -1151,21 +1259,22 @@ class QuietHoursPlugin(Star):
             )
         if self._is_group_exempt(event):
             return QuietState(), None
-        return self._quiet_now(), None
+        return self._quiet_now(event), None
 
     def _in_scope(self, event: AstrMessageEvent) -> bool:
-        scope = str(self._opt("scope") or "all").strip().lower()
-        if scope == "groups":
-            try:
-                return bool(event.get_group_id())
-            except Exception:
-                return False
-        if scope == "private":
-            try:
-                return bool(event.is_private_chat())
-            except Exception:
-                return False
-        return True
+        """全局范围之外，允许方案白名单把特定会话单独纳入。"""
+
+        enabled, _mode, schemes, scope, _context = self._config_snapshot()
+        if not enabled:
+            return False
+        if scope_matches_event(event, scope):
+            return True
+        return any(
+            scheme.enabled
+            and scheme.whitelist
+            and scheme_matches_event(scheme, event, scope)
+            for scheme in schemes
+        )
 
     # -- 身份判断 --------------------------------------------------------
 
@@ -1599,7 +1708,13 @@ class QuietHoursPlugin(Star):
         enabled, mode, schemes, scope, context_plugins = self._config_snapshot()
         now = self._now()
         holidays_enabled = self._bool_opt("holiday_enabled")
-        state = query_scheme_state(now, schemes, self._holidays, holidays_enabled)
+        scope_text = {"all": "所有会话", "groups": "仅群聊", "private": "仅私聊"}.get(
+            scope, scope
+        )
+        applicable_schemes = schemes_for_event(schemes, event, scope)
+        state = query_scheme_state(
+            now, applicable_schemes, self._holidays, holidays_enabled
+        )
         tz_name = str(self._opt("timezone") or "").strip() or "系统本地时区"
 
         if not enabled:
@@ -1611,9 +1726,6 @@ class QuietHoursPlugin(Star):
             )
             return
 
-        scope_text = {"all": "所有会话", "groups": "仅群聊", "private": "仅私聊"}.get(
-            scope, scope
-        )
         mode_text = "完全关闭" if mode == "full" else "保留上下文/缓存"
         lines = ["静默时段状态"]
         today_holiday = holiday_text(self._holidays, now.date()) if holidays_enabled else ""
@@ -1639,7 +1751,8 @@ class QuietHoursPlugin(Star):
                 continue
             lines.append(
                 f"· 方案「{scheme.name}」：{scheme.weekday_text()}；"
-                f"{scheme.window_text()}；{scheme.holiday_text()}"
+                f"{scheme.window_text()}；{scheme.holiday_text()}；"
+                f"{scheme.whitelist_text(scope_text)}"
             )
         lines.append(f"· 范围：{scope_text}；静默强度：{mode_text}；时区：{tz_name}")
         lines.append(f"· 管理员豁免：{'开' if self._bool_opt('bypass_admins') else '关'}")
@@ -1674,7 +1787,9 @@ class QuietHoursPlugin(Star):
         elif state.active and state.interval is not None:
             start_dt, end_dt = state.interval
             remaining = (end_dt - now).total_seconds()
-            active_names = active_scheme_names(now, schemes, self._holidays, holidays_enabled)
+            active_names = active_scheme_names(
+                now, applicable_schemes, self._holidays, holidays_enabled
+            )
             current = "静默中"
             if active_names:
                 current += f"（{'、'.join(active_names)}）"
@@ -1706,9 +1821,10 @@ class QuietHoursPlugin(Star):
                 next_open=temp_until,
             )
         else:
-            _enabled, _mode, schemes, _scope, _context = self._config_snapshot()
+            _enabled, _mode, schemes, scope, _context = self._config_snapshot()
+            applicable = schemes_for_event(schemes, event, scope)
             state = query_scheme_state(
-                now, schemes, self._holidays, self._bool_opt("holiday_enabled")
+                now, applicable, self._holidays, self._bool_opt("holiday_enabled")
             )
             if state.interval is None:
                 # 不在静默时段也给出一个示例时间，方便预览模板

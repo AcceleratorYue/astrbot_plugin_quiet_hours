@@ -50,6 +50,15 @@
             ],
             "default": "skip",
             "hint": "skip=法定节假日跳过；run=法定节假日也启用"
+          },
+          "whitelist": {
+            "description": "会话白名单",
+            "type": "list",
+            "items": {
+              "type": "string"
+            },
+            "default": [],
+            "hint": "留空时跟随插件整体范围（all/groups/private）；填写群号、私聊 QQ 号或完整会话 UMO 后，本方案只对这些会话生效。多个会话请逐项添加。"
           }
         }
       }
